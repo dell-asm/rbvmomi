@@ -75,6 +75,7 @@ class RbVmomi::VIM::OvfManager
         puts "WARNING: OVF upload NFC lease timeout less than 4 minutes"
       end
       progress = 5.0
+      deploy_result = nil
       result.fileItem.each do |fileItem|
         leaseInfo, leaseState, leaseError = nfcLease.collect 'info', 'state', 'error'
         # Retry nfcLease.collect because of PR 969599:
@@ -124,7 +125,7 @@ class RbVmomi::VIM::OvfManager
         begin
           begin
             puts "Iteration #{i}: Trying to get host's IP address ..."
-            ip = opts[:host].config.network.vnic[0].spec.ip.ipAddress
+            ip = opts[:host].config.network.vnic.find { |nic| nic.device == "vmk0" }.spec.ip.ipAddress
           rescue Exception=>e
             puts "Iteration #{i}: Couldn't get host's IP address: #{e}"
           end
@@ -139,8 +140,9 @@ class RbVmomi::VIM::OvfManager
         # to the uploadCmd. It is not clear to me why, but that leads to 
         # trucation of the uploaded disk. Without this option curl can't tell
         # the progress, but who cares
-        system("#{downloadCmd} | #{uploadCmd}", :out => "/dev/null")
-        
+        deploy_result = system("#{downloadCmd} | #{uploadCmd}", :out => "/dev/null")
+        puts ("Failed to transfer OVA image, check network configuration") unless deploy_result
+
         keepAliveThread.kill
         keepAliveThread.join
         
@@ -181,6 +183,21 @@ class RbVmomi::VIM::OvfManager
         i += 1
         retry if i < 3
         puts "Giving up HttpNfcLeaseComplete.."
+      end
+      unless deploy_result
+        begin
+          vm.PowerOffVM_Task.wait_for_completion
+          puts "OVF deploy failed, deleting VM."
+        rescue
+          puts "OVF deploy failed and VM already powered down. Deleting VM."
+        end
+        destroy_task = vm.Destroy_Task
+        destroy_task.wait_for_completion
+        if destroy_task.info.state == "success"
+          raise("OVF deployment failed. Check network configuration and try again.")
+        else
+          raise("OVF deployment failed, and unable to delete VM. Check network configuration, ensure VM removed, and try again.")
+        end
       end
       vm
     end
